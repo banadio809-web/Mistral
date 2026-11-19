@@ -177,9 +177,11 @@ class Recorder:
                          f"{resp.status if resp else '??'}", url)
             return str(resp.status if resp else 0), body_txt
 
-        # POST: show it happening inside a runner page (video-visible)
+        # POST: show it happening inside a runner page (video-visible).
+        # The runner must live on the site's origin — about:blank is an
+        # opaque origin and Chrome blocks cross-origin fetch() from it.
         self.caption(label, f"POST {url}")
-        self.page.goto("about:blank")
+        self._goto_origin_runner(url)
         body_ser = json.dumps({k: str(v) for k, v in (body or {}).items()})
         url_ser = json.dumps(url)
         result = self.page.evaluate(
@@ -197,12 +199,21 @@ class Recorder:
                      (result.get("body") or "")[:400])
         return str(result.get("status")), result.get("body") or ""
 
+    def _goto_origin_runner(self, url: str):
+        """Load any same-origin page before in-page fetch() calls."""
+        p = urllib.parse.urlparse(url)
+        runner = f"{p.scheme}://{p.netloc}/"
+        try:
+            self.page.goto(runner, wait_until="load", timeout=15000)
+        except Exception:
+            pass
+
     def upload_multipart(self, url: str, field: str, filename: str,
                          content: str, extra_params: dict = None,
                          label: str = "Uploading PoC payload"):
         """Visible multipart upload: builds the request on a runner page."""
         self.caption(label, url)
-        self.page.goto("about:blank")
+        self._goto_origin_runner(url)
         spec = json.dumps({"url": url, "field": field, "filename": filename,
                            "extra": {k: str(v) for k, v in
                                      (extra_params or {}).items()}})
