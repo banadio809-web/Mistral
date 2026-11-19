@@ -1,0 +1,84 @@
+// Prisma schema for the WordPress plugin bug finder.
+// Store plugins, scans and researcher-aware findings (CVSS + Wordfence scope).
+//
+// Postgres (production):
+//   export DATABASE_URL="postgresql://user:pass@host:5432/wpbugfinder"
+//   pip install prisma && prisma generate && wpbugfinder db-init
+
+generator client {
+  provider             = "prisma-client-py"
+  output               = "./prisma_client"
+  interface            = "asyncio"
+  recursive_type_depth = "5"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Severity {
+  Info
+  Low
+  Medium
+  High
+  Critical
+}
+
+model Plugin {
+  id             String   @id @default(cuid())
+  slug           String   @unique
+  name           String
+  version        String?
+  activeInstalls Int?
+  sourcePath     String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @default(now()) @updatedAt
+  scans          Scan[]
+
+  @@index([slug])
+}
+
+model Scan {
+  id            String   @id @default(cuid())
+  pluginId      String
+  plugin        Plugin   @relation(fields: [pluginId], references: [id], onDelete: Cascade)
+  startedAt     DateTime @default(now())
+  filesScanned  Int
+  findingCount  Int
+  criticalCount Int
+  highCount     Int
+  inScopeCount  Int
+  findings      Finding[]
+
+  @@index([pluginId, startedAt])
+}
+
+model Finding {
+  id         String   @id @default(cuid())
+  scanId     String
+  scan       Scan     @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  rule       String
+  title      String
+  severity   Severity
+  score      Float
+  vector     String
+  attacker   String
+  // JSON array string, e.g. ["CWE-89"]
+  cwe        String    @default("[]")
+  file       String
+  line       Int
+  snippet    String
+  entryHook  String?
+  // JSON array string of taint path elements
+  taintPath  String    @default("[]")
+  note       String?
+  inScope    Boolean
+  scopeNote  String?
+  createdAt  DateTime @default(now())
+
+  @@index([rule])
+  @@index([severity])
+  @@index([scanId])
+  @@index([inScope, severity])
+}

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.wpbf-cache/
+wpbf.sqlite
+tests/prisma-test/wpbf-test.db
+prisma/prisma_client/queries.json
+prisma/prisma_client/
+tests/prisma-test/prisma_client/
