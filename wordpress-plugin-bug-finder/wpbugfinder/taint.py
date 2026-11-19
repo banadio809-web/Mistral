@@ -26,8 +26,11 @@ SANITIZERS = frozenset({
     "wp_parse_slug_list", "wp_check_filetype", "wp_check_filetype_and_ext",
     "wp_kses", "wp_kses_post", "wp_kses_data", "wp_filter_kses",
     "wp_strip_all_tags", "strip_tags",
-    "esc_html", "esc_attr", "esc_url", "esc_js", "esc_textarea", "esc_sql",
+    "esc_html", "esc_attr", "esc_url", "esc_url_raw", "esc_js",
+    "esc_textarea", "esc_sql", "esc_xml", "esc_textarea",
     "esc_attr__", "esc_html__", "esc_html_x", "esc_attr_x",
+    "sanitize_term_field", "sanitize_post_field", "sanitize_user_field",
+    "sanitize_mime_type", "wp_check_invalid_utf8",
     "escapeshellarg", "escapeshellcmd", "htmlentities", "htmlspecialchars",
     "urlencode", "rawurlencode", "wp_json_encode", "json_encode",
     "wp_slash", "wp_validate_redirect", "serialize", "md5", "sha1",
@@ -174,6 +177,80 @@ def expr_tainted(masked: str, expr: str, offset: int, tainted_vars: dict) -> boo
 TOP_ASSIGN = re.compile(r"(\+=|-=|\*=|/=|\.=|=(?!=))")
 
 
+RETURN_RE = re.compile(r"^return\b")
+
+
+def function_params(masked: str, name: str, bpos: int, fpos: int) -> list:
+    """Parameter variable names of a function ('...$a, ... $b' -> ['$a','$b'])."""
+    decl = masked[fpos:bpos]
+    lp = decl.find("(")
+    if lp == -1:
+        return []
+    rp = decl.rfind(")", lp)
+    if rp == -1:
+        return []
+    params = []
+    for piece in _split_top_level(decl[lp + 1:rp], ","):
+        m = re.search(r"(&?\$[A-Za-z_]\w*)\s*(?:=|$)", piece.strip())
+        if m:
+            params.append(m.group(1).lstrip("&"))
+    return params
+
+
+def _split_top_level(text: str, sep: str) -> list:
+    out, depth, cur = [], 0, []
+    for ch in text:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == sep and depth == 0:
+            out.append("".join(cur))
+            cur = []
+            continue
+        cur.append(ch)
+    if cur:
+        out.append("".join(cur))
+    return [s.strip() for s in out if s.strip()]
+
+
+SUMMARIZE_PASSES = 2
+
+
+def helper_summaries(masked: str) -> dict:
+    """For each local function, decide whether its RETURN VALUE can carry
+    attacker-controlled data.  A function is a 'tainted-returning helper'
+    when a `return` statement returns an expression proven tainted given
+    that its parameters start tainted and calls to other known tainted
+    helpers propagate taint.  Two passes: the second resolves helpers that
+    call other helpers defined later in the file."""
+    funcs = list(phpmod.functions(masked))
+    summaries: dict = {}
+    for _ in range(SUMMARIZE_PASSES):
+        nxt = dict(summaries)
+        for (name, bpos, bend, fpos) in funcs:
+            if name in nxt and nxt[name]:
+                continue
+            state = {p: True
+                     for p in function_params(masked, name, bpos, fpos)}
+            base_line = phpmod.line_of(masked, bpos)
+            tainted_ret = False
+            for (text, off, end, sl, el) in phpmod.statements(
+                    masked[bpos + 1:bend], base_line=base_line):
+                abs_off = bpos + 1 + off
+                rm = RETURN_RE.match(text)
+                if rm and expr_tainted(masked, text[rm.end():],
+                                       abs_off + rm.end(), state):
+                    tainted_ret = True
+                    break
+                apply_statement(state, masked, text, abs_off, summaries=nxt)
+            nxt[name] = tainted_ret
+        if nxt == summaries:
+            break
+        summaries = nxt
+    return {k: v for k, v in summaries.items() if v}
+
+
 def top_level_assigns(stmt: str):
     """Yield (lhs_text, operator, rhs_text, rhs_rel_offset) for top-level
     assignments in a statement."""
@@ -197,8 +274,11 @@ def top_level_assigns(stmt: str):
     return results
 
 
-def apply_statement(state: dict, masked: str, stmt: str, offset: int):
-    """Propagate taint through one statement (mutates `state`)."""
+def apply_statement(state: dict, masked: str, stmt: str, offset: int,
+                    summaries: dict = None):
+    """Propagate taint through one statement (mutates `state`).  `summaries`
+    maps tainted-returning helper names → True: calling `helper($tainted)`
+    taints the call expression, so `$v = helper($_GET['q'])` taints `$v`."""
     low = stmt.strip()
 
     if low.startswith("unset("):
@@ -230,6 +310,8 @@ def apply_statement(state: dict, masked: str, stmt: str, offset: int):
     for (lhs, op, rhs, rhs_rel) in top_level_assigns(low):
         rhs_off = offset + rhs_rel
         t = expr_tainted(masked, rhs, rhs_off, state)
+        if not t and summaries:
+            t = _helper_call_tainted(masked, rhs, rhs_off, state, summaries)
         prop_targets = [re.sub(r"\s+", "", m.group(0))
                         for m in PROP_RE.finditer(lhs)]
         plain_targets = [v.split("[")[0] for v in VAR_RE.findall(
@@ -245,7 +327,31 @@ def apply_statement(state: dict, masked: str, stmt: str, offset: int):
                     state[key] = True
 
 
-def replay_function(masked: str, funcs, target_offset: int | None = None):
+CALL_ARG_RE_TEMPLATE = r"(?<![\$\w>\\])%s\s*\("
+
+
+def _helper_call_tainted(masked: str, rhs: str, rhs_off: int,
+                         state: dict, summaries: dict) -> bool:
+    """True when the RHS expression contains a call to a known
+    tainted-returning helper with an unsanitized tainted argument."""
+    for hname in summaries:
+        m = re.search(CALL_ARG_RE_TEMPLATE % re.escape(hname), rhs)
+        if not m:
+            continue
+        open_off = rhs_off + m.end() - 1
+        close = phpmod.match_paren(masked, open_off)
+        if close == -1:
+            continue
+        arg = masked[open_off + 1:close]
+        occ = [o for o in tainted_occurrences(masked, arg,
+                                              open_off + 1, state) if o[2]]
+        if occ:
+            return True
+    return False
+
+
+def replay_function(masked: str, funcs, target_offset: int | None = None,
+                    summaries: dict = None):
     """Replay a function's statements, yielding (stmt_tuple, state_copy).
     stmt_tuple = (text, abs_offset, end_offset, line_start, line_end)."""
     for (name, bpos, bend, _) in funcs:
@@ -254,7 +360,8 @@ def replay_function(masked: str, funcs, target_offset: int | None = None):
         for (text, off, end, sl, el) in phpmod.statements(masked[bpos + 1:bend],
                                                           base_line=base_line):
             abs_off = bpos + 1 + off
-            apply_statement(state, masked, text, abs_off)
+            apply_statement(state, masked, text, abs_off,
+                            summaries=summaries)
             yield (text, abs_off, bpos + 1 + end, sl, el), dict(state), name
             if target_offset is not None and abs_off > target_offset:
                 return
@@ -262,5 +369,10 @@ def replay_function(masked: str, funcs, target_offset: int | None = None):
 
 def statements_with_state(masked: str):
     funcs = list(phpmod.functions(masked))
-    for (text, off, end, sl, el), state, fname in replay_function(masked, funcs):
+    try:
+        summaries = helper_summaries(masked)
+    except Exception:
+        summaries = {}
+    for (text, off, end, sl, el), state, fname in replay_function(
+            masked, funcs, summaries=summaries):
         yield (text, off, end, sl, el), state, fname

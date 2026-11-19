@@ -146,6 +146,16 @@ VULN_CLASSES = {
                                "AV:N/AC:L/PR:{PR}/UI:R/S:U/C:N/I:L/A:N"),
     "ssrf": VulnClass("ssrf", "Server-Side Request Forgery", ("CWE-918",),
                       "AV:N/AC:L/PR:{PR}/UI:N/S:U/C:H/I:N/A:N"),
+    "file_inclusion": VulnClass(
+        "file_inclusion", "Local File Inclusion / RFI", ("CWE-22", "CWE-98"),
+        "AV:N/AC:L/PR:{PR}/UI:N/S:U/C:H/I:H/A:H"),
+    "variable_overwrite": VulnClass(
+        "variable_overwrite", "Attacker-Controlled Variable Overwrite",
+        ("CWE-484",),
+        "AV:N/AC:L/PR:{PR}/UI:N/S:U/C:H/I:H/A:H"),
+    "command_injection": VulnClass(
+        "command_injection", "OS Command Injection", ("CWE-78",),
+        "AV:N/AC:L/PR:{PR}/UI:N/S:U/C:H/I:H/A:H"),
     "info_exposure": VulnClass(
         "info_exposure", "Sensitive Information Exposure",
         ("CWE-200", "CWE-538"),

@@ -150,6 +150,39 @@ def cmd_audit(args):
     print(f"\ntotal findings: {grand}")
 
 
+def cmd_verify(args):
+    """Run the end-to-end verification agent against a scanned plugin."""
+    from .verify import HAS_PLAYWRIGHT
+    from .verify.agent import VerifyAgent
+    from .verify.sandbox import SandboxError
+
+    for meta in _load_plugins([args.target]):
+        results = scanner.scan_plugin(
+            meta["path"], slug=meta.get("slug"), version=meta.get("version"),
+            active_installs=meta.get("active_installs"),
+            include_vendor=args.include_vendor)
+        if args.video and not HAS_PLAYWRIGHT:
+            print("  . playwright not installed — videos will be skipped "
+                  "(pip install playwright && playwright install chromium)",
+                  file=sys.stderr)
+        agent = VerifyAgent(
+            results, meta["path"],
+            runs_dir=args.runs_dir, sandbox_mode=args.sandbox,
+            video=args.video and args.sandbox != "off",
+            limit=args.limit, only_rule=args.only_rule,
+            min_severity=args.min_severity)
+        try:
+            summary = agent.run()
+        except SandboxError as exc:
+            print(f"  !! sandbox error: {exc}", file=sys.stderr)
+            continue
+        print(f"\n=== verification summary ({summary['slug']}) ===")
+        for a in summary.get("verification_attempts", []):
+            print(f"  [{a['verdict']:>16}] {a['rule']:>24} "
+                  f"{a['file']}:{a['line']}  {a['evidence'][:100]}")
+        print(f"  artifacts: {summary['run_dir']}")
+
+
 def build_parser():
     ap = argparse.ArgumentParser(prog="wpbugfinder", description=__doc__)
     ap.add_argument("--min-severity", default="low", choices=SEV_CHOICES)
@@ -198,6 +231,22 @@ def build_parser():
     a.add_argument("--top", type=int, default=10,
                    help="how many plugins to audit with --search/--browse")
     a.set_defaults(fn=cmd_audit)
+
+    v = sub.add_parser(
+        "verify", help="verify findings end-to-end: docker WordPress "
+                       "sandbox + recorded browser PoC runs")
+    v.add_argument("target", help="slug, wordpress.org URL, or local path")
+    v.add_argument("--limit", type=int, default=10,
+                   help="max findings to verify (default 10)")
+    v.add_argument("--only-rule", help="verify only this rule (e.g. sqli)")
+    v.add_argument("--no-video", dest="video", action="store_false",
+                   help="skip video recording (headless HTTP checks only)")
+    v.set_defaults(video=True)
+    v.add_argument("--sandbox", choices=["reuse", "fresh", "off"],
+                   default="reuse", help="reuse/fresh docker sandbox or off")
+    v.add_argument("--runs-dir", default=None,
+                   help="where to write verification artifacts")
+    v.set_defaults(fn=cmd_verify)
     return ap
 
 

@@ -59,6 +59,13 @@ def scan_plugin(source_dir: str, slug: str = None, version: str = None,
     plugin_name = slug or main_header.get("name") or os.path.basename(
         os.path.normpath(source_dir))
 
+    # ---- PASS 1: plugin-wide entry-point registry (cross-file) ------------
+    # Hook registrations often live in a different file than the callback
+    # body.  Index every attacker-reachable hook on the raw source of every
+    # file first, then hand the full map to each per-file scan so a sink in
+    # file B gets the attacker context of the add_action() in file A.
+    entry_by_func: dict = {}
+    files_php = []
     for path, rel in iter_php_files(source_dir, include_vendor):
         try:
             source = open(path, encoding="utf-8", errors="replace").read()
@@ -66,26 +73,27 @@ def scan_plugin(source_dir: str, slug: str = None, version: str = None,
             continue
         if "<?php" not in source and "<?=" not in source:
             continue
-        files_scanned += 1
-        masked = phpmod.mask_php(source)
-        if not masked.strip():
-            continue
-
-        # entry points resolved on RAW source (hook names live in strings);
-        # map callback function -> (attacker privilege, entry info)
-        entry_by_func = {}
+        files_php.append((path, rel, source))
         try:
             for ep in C.endpoints(source):
                 fn = ep.callback[1] if ep.callback else None
                 if fn:
-                    entry_by_func.setdefault(fn, (ep.privilege, {
-                        "hook": ep.hook, "kind": ep.kind, "line": ep.line,
-                    }))
+                    entry_by_func.setdefault(fn, (
+                        ep.privilege,
+                        {"hook": ep.hook, "kind": ep.kind, "line": ep.line,
+                         "file": rel}))
         except Exception:
-            entry_by_func = {}
-        ctx_info = {"privilege_default": privilege_default,
-                    "entry_by_func": entry_by_func}
+            continue
 
+    ctx_info = {"privilege_default": privilege_default,
+                "entry_by_func": entry_by_func}
+
+    findings = []
+    for path, rel, source in files_php:
+        files_scanned += 1
+        masked = phpmod.mask_php(source)
+        if not masked.strip():
+            continue
         findings += sinks.scan(masked, source, rel, ctx_info)
         findings += authorization.scan(masked, source, rel, ctx_info)
         findings += misc.scan(masked, source, rel, ctx_info)

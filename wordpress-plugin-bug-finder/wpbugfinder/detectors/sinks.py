@@ -67,6 +67,24 @@ def _first_top_level_arg_span(masked: str, open_off: int):
     return None
 
 
+def _has_top_level_comma(masked: str, open_off: int) -> bool:
+    """True when the call opened at open_off has more than one top-level
+    argument (a top-level comma between its parens)."""
+    close = phpmod.match_paren(masked, open_off)
+    if close == -1:
+        return False
+    depth = 0
+    for i in range(open_off + 1, close):
+        ch = masked[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return True
+    return False
+
+
 # sink tables ---------------------------------------------------------------
 
 SQL_SINKS = [
@@ -100,7 +118,26 @@ FILE_READ_SINKS = [
 FILE_WRITE_SINKS = [
     (r"(?<![\\$\w>])file_put_contents\s*\(", "file_put_contents"),
     (r"(?<![\\$\w>])fwrite\s*\(", "fwrite"),
+    (r"(?<![\\$\w>])fputs\s*\(", "fputs"),
+    (r"(?<![\\$\w>])mkdir\s*\(", "mkdir"),
+    (r"(?<![\\$\w>])touch\s*\(", "touch"),
+    (r"(?<![\\$\w>])copy\s*\(", "copy"),
+    (r"->\s*extractTo\s*\(", "ZipArchive->extractTo"),
 ]
+
+# include/require + taint = local/remote file execution (CWE-22/98/94)
+FILE_INCLUSION_SINKS = [
+    (r"(?<![\$\w>])include\s*\(", "include"),
+    (r"(?<![\$\w>])include_once\s*\(", "include_once"),
+    (r"(?<![\$\w>])require\s*\(", "require"),
+    (r"(?<![\$\w>])require_once\s*\(", "require_once"),
+]
+
+# extract() / parse_str() with attacker data rewrite arbitrary variables
+VARIABLE_OVERWRITE_SOURCE_RE = re.compile(
+    r"\$_(GET|POST|REQUEST|COOKIE|FILES)\b|php://input",
+    re.I)
+EXTR_SKIP_RE = re.compile(r"EXTR_(SKIP|PREFIX_ALL|PREFIX_SAME|PREFIX_IF_EXISTS)")
 
 FILE_DELETE_SINKS = [
     (r"(?<![\\$\w>])unlink\s*\(", "unlink"),
@@ -128,7 +165,7 @@ XSS_FUNCS = [
     (r"(?<![\$\w>])var_dump\s*\(", "var_dump"),
 ]
 
-ECHO_RE = re.compile(r"^(?:echo|print|printf)\b|^=\s*")
+ECHO_RE = re.compile(r"^(?:echo|print|printf|die|exit)\b|^=\s*")
 
 OTHER_SINKS = {
     "unserialize": "object_injection",
@@ -229,6 +266,13 @@ def scan(masked: str, source: str, relpath: str, ctx_info: dict) -> list:
             for occ, open_off in occs(rx):
                 add("ssrf", occ, open_off, note=f"{name}() URL from request data")
 
+        # include/require of an attacker-controlled path (LFI / RFI)
+        for rx, name in FILE_INCLUSION_SINKS:
+            for occ, open_off in occs(rx):
+                add("file_inclusion", occ, open_off,
+                    note=f"{name}() of a request-controlled path "
+                         f"(local/remote file inclusion → execution)")
+
         # redirect — wp_safe_redirect is not a sink (validated)
         for occ, open_off in occs(SINK % "wp_redirect"):
             add("open_redirect", occ, open_off, note="wp_redirect() with request data")
@@ -252,6 +296,30 @@ def scan(masked: str, source: str, relpath: str, ctx_info: dict) -> list:
                         "shortcode_exec": f"{call}() with request data",
                     }[rule]
                     add(rule, occ, open_off, note=note)
+
+        # extract($_REQUEST) / parse_str($input) — arbitrary variable rewrite
+        for call in ("extract", "parse_str", "mb_parse_str",
+                     "import_request_variables"):
+            cm = re.search(SINK % call, stmt)
+            if not cm:
+                continue
+            open_off = off + cm.end() - 1
+            arg, arg_off, close = _paren_arg(masked, open_off)
+            if close == -1 or not arg:
+                continue
+            if call == "extract" and EXTR_SKIP_RE.search(arg):
+                continue  # EXTR_SKIP / prefixed modes don't overwrite
+            if call not in ("import_request_variables",):
+                if _has_top_level_comma(masked, open_off):
+                    continue  # target array given: no symbol-table rewrite
+            if not VARIABLE_OVERWRITE_SOURCE_RE.search(arg):
+                continue
+            occ = [o for o in T.tainted_occurrences(masked, arg, arg_off, state)
+                   if o[2]]
+            if occ:
+                add("variable_overwrite", occ, cm.end() - 1,
+                    note=f"{call}() rewrites the symbol table from request "
+                         f"data (attacker-controlled variable overwrite)")
 
     return _dedupe(findings)
 

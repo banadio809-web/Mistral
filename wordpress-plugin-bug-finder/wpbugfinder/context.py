@@ -137,7 +137,9 @@ def endpoints(masked: str) -> list:
                             line=phpmod.line_of(masked, m.start()), note=None,
                             func_pos=bpos))
 
-    # REST routes: unauthenticated unless a permission_callback is present
+    # REST routes: resolve the 'callback' argument to a function whenever the
+    # call is written inline (register_rest_route('ns', '/path', [ 'callback'
+    # => fn ])).  Unauthenticated unless a permission_callback is present.
     for m in REGISTER_REST.finditer(masked):
         open_pos = masked.index("(", m.start())
         close_pos = phpmod.match_paren(masked, open_pos)
@@ -145,10 +147,20 @@ def endpoints(masked: str) -> list:
             continue
         call = masked[open_pos:close_pos]
         has_pc = "permission_callback" in call
-        ep = Endpoint(hook="rest_route", callback=(), privilege=None,
-                      kind="rest", line=phpmod.line_of(masked, m.start()),
+        cls, fn = (None, None)
+        cbm = re.search(
+            r"['\"]callback['\"]\s*=>\s*(" + _CALLBACK + r")", call, re.S)
+        if cbm:
+            cls, fn = _parse_callback(cbm.group(1))
+            if fn is not None:
+                bpos = pos_of(fn, cls)
+        else:
+            bpos = None
+        ep = Endpoint(hook="rest_route", callback=(cls, fn) if fn else (),
+                      privilege=None, kind="rest",
+                      line=phpmod.line_of(masked, m.start()),
                       note="no permission_callback" if not has_pc
-                      else "permission_callback present", func_pos=None)
+                      else "permission_callback present", func_pos=bpos)
         if not has_pc:
             ep.privilege = "unauthenticated"
         else:
