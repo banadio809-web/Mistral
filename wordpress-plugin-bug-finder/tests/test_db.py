@@ -4,6 +4,11 @@ os.environ["WPBF_DB_MODE"] = "test"
 os.environ["DATABASE_URL"] = "sqlite://./tests/prisma-test/wpbf-test.db"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+if not os.path.isdir(os.path.join(os.path.dirname(__file__), "prisma-test", "prisma_client")):
+    raise unittest.SkipTest(
+        "sqlite prisma client not generated; run: WPBF_DB_MODE=test "
+        "python3 -m prisma generate --schema tests/prisma-test/schema.prisma")
+
 from wpbugfinder import scanner, db
 
 
