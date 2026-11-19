@@ -152,8 +152,7 @@ def endpoints(masked: str) -> list:
             r"['\"]callback['\"]\s*=>\s*(" + _CALLBACK + r")", call, re.S)
         if cbm:
             cls, fn = _parse_callback(cbm.group(1))
-            if fn is not None:
-                bpos = pos_of(fn, cls)
+            bpos = pos_of(fn, cls) if fn is not None else None
         else:
             bpos = None
         ep = Endpoint(hook="rest_route", callback=(cls, fn) if fn else (),
